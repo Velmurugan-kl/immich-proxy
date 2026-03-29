@@ -22,4 +22,4 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/immich-proxy:latest
+          tags: ghcr.io/velmurugan-kl/immich-proxy:latest
