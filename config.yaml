@@ -1,0 +1,86 @@
+# =============================================================================
+# Media Processor Configuration
+# =============================================================================
+# This file is the single source of truth consumed by:
+#   - processor.py  (conversion engine)
+#   - convert.py    (CLI batch runner)
+#   - web_ui.py     (settings UI)
+#   - proxy.py      (future proxy layer)
+#
+# Edit manually or via the web UI at http://localhost:5000
+# =============================================================================
+
+# --- Paths -------------------------------------------------------------------
+paths:
+  input_dir:  "D:/HomeLab/custom-proxy/sample/input"
+  output_dir: "D:/HomeLab/custom-proxy/sample/output"
+  # Temp dir for proxy in-memory conversions (ExifTool needs real file paths)
+  tmp_dir:    "D:/HomeLab/custom-proxy/sample/tmp"
+
+# --- Output format -----------------------------------------------------------
+# Choices: jpeg | png | webp | tiff | original
+#   original  → passthrough, no conversion (file copied as-is)
+#   jpeg      → lossy, smallest files, universal support
+#   png       → lossless, large files, universal support
+#   webp      → lossy or lossless, excellent compression, good modern support
+#   tiff      → lossless, very large, professional/archival use
+output:
+  format: png
+
+  # JPEG: quality 1–100 (95+ is visually lossless)
+  jpeg_quality: 95
+
+  # PNG: compression 0–9 (lossless at all levels, only speed/size tradeoff)
+  png_compression: 0
+
+  # WebP: quality 1–100 for lossy; set webp_lossless: true to override
+  webp_quality: 90
+  webp_lossless: false
+
+  # TIFF: lossless by default (no quality setting needed)
+
+# --- Filename template -------------------------------------------------------
+# Available tokens:
+#   {year}        4-digit year              e.g. 2026
+#   {month}       2-digit month             e.g. 03
+#   {day}         2-digit day               e.g. 21
+#   {hour}        2-digit hour (24h)        e.g. 16
+#   {minute}      2-digit minute            e.g. 01
+#   {second}      2-digit second            e.g. 06
+#   {make}        Camera make               e.g. Apple
+#   {model}       Camera model              e.g. iPhone_15
+#   {filename}    Original stem (no ext)    e.g. IMG_0035
+#   {counter}     Collision counter         e.g. 1 (only added when needed)
+#   {city}        GPS city   [not yet implemented — reserved]
+#   {country}     GPS country [not yet implemented — reserved]
+#
+# Spaces in make/model are replaced with underscores automatically.
+# Missing tokens are replaced with a configurable fallback string.
+# Separator between tokens is preserved exactly as typed.
+#
+# Examples:
+#   "{year}-{month}-{day}_{make}_{model}_{filename}"
+#     → 2026-03-21_Apple_iPhone_15_IMG_0035.png
+#
+#   "{year}/{month}/{day}/{filename}"
+#     → 2026/03/21/IMG_0035.png   (subdirectories created automatically)
+#
+#   "{filename}_{year}{month}{day}"
+#     → IMG_0035_20260321.png
+
+filename:
+  template: "{year}-{month}-{day}_{make}_{model}_{filename}"
+  # Value substituted when a token has no data in the file's metadata
+  fallback: "unknown"
+
+# --- Processing --------------------------------------------------------------
+processing:
+  # Number of parallel worker processes.
+  # 0 = auto (min of CPU count and 8)
+  workers: 0
+
+  # Which source file types trigger conversion (everything else is passthrough)
+  # Case-insensitive. Add more if needed.
+  convert_suffixes:
+    - .heic
+    - .heif

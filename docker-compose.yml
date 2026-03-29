@@ -1,0 +1,162 @@
+# =============================================================================
+# Immich + HEIC Proxy  —  docker-compose.yml
+# =============================================================================
+#
+# SETUP:
+#   1. Copy stack.env.example → stack.env and fill in your values
+#   2. docker compose up -d
+#   3. Point your Immich app / browser to  http://<host>:2283  (the proxy)
+#      The proxy transparently forwards everything except HEIC uploads.
+#
+# CONFIG:
+#   All converter settings live in config.yaml (mounted into the proxy).
+#   Alternatively, override individual settings with environment variables
+#   (see the proxy service's `environment` block below).
+#   After changing config.yaml:  curl -X POST http://<host>:2285/admin/reload
+#   After changing env vars:     docker compose restart immich-heic-proxy
+#
+# PORTS:
+#   2283  →  proxy (clients connect here — same port Immich normally uses)
+#   2284  →  immich-server direct (bypass proxy, useful for debugging)
+#   2285  →  proxy admin API  (/admin/health, /admin/reload)
+# =============================================================================
+
+name: immich
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # HEIC Proxy  — sits in front of immich-server
+  # ---------------------------------------------------------------------------
+  immich-heic-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: immich_heic_proxy
+    ports:
+      - "2283:2283"    # main entry point for clients
+      - "2285:2285"    # admin API (reload, health)
+    volumes:
+      # Mount config.yaml so you can edit it without rebuilding the image.
+      # Remove this line to bake config.yaml into the image instead.
+      - ./config.yaml:/app/config.yaml:ro
+      # Persistent tmp dir for in-flight conversions
+      - proxy-tmp:/tmp/proxy
+    environment:
+      # --- Upstream Immich server ---
+      # Overrides the `upstream` key in config.yaml
+      IMMICH_UPSTREAM: "http://immich-server:2283"
+
+      # --- Output format ---
+      # Overrides output.format in config.yaml
+      # Choices: jpeg | png | webp | tiff | original
+      IMMICH_FORMAT: "png"
+
+      # --- Quality settings (only the active format matters) ---
+      IMMICH_JPEG_QUALITY: "95"
+      IMMICH_PNG_COMPRESSION: "0"
+      IMMICH_WEBP_QUALITY: "90"
+      IMMICH_WEBP_LOSSLESS: "false"
+
+      # --- Filename template ---
+      # Overrides filename.template in config.yaml
+      IMMICH_TEMPLATE: "{year}-{month}-{day}_{make}_{model}_{filename}"
+      IMMICH_FALLBACK: "unknown"
+
+      # --- Workers ---
+      # Number of parallel conversion workers (0 = auto)
+      IMMICH_WORKERS: "0"
+
+      # --- Proxy port ---
+      PROXY_PORT: "2283"
+
+      # --- Admin port ---
+      ADMIN_PORT: "2285"
+
+      # --- Tmp dir ---
+      IMMICH_TMP_DIR: "/tmp/proxy"
+
+    depends_on:
+      immich-server:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:2283/admin/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # Immich server  — now internal only (clients go through proxy)
+  # ---------------------------------------------------------------------------
+  immich-server:
+    container_name: immich_server
+    image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-release}
+    volumes:
+      - ${UPLOAD_LOCATION}:/usr/src/app/upload
+      - /etc/localtime:/etc/localtime:ro
+    env_file:
+      - stack.env
+    ports:
+      - "2284:2283"    # direct access port (for debugging — not for clients)
+    expose:
+      - "2283"         # internal Docker network only
+    depends_on:
+      - redis
+      - database
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:2283/api/server/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Machine learning
+  # ---------------------------------------------------------------------------
+  immich-machine-learning:
+    container_name: immich_machine_learning
+    image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-release}
+    volumes:
+      - model-cache:/cache
+    restart: unless-stopped
+    healthcheck:
+      disable: false
+
+  # ---------------------------------------------------------------------------
+  # Redis
+  # ---------------------------------------------------------------------------
+  redis:
+    container_name: immich_redis
+    image: docker.io/valkey/valkey:9
+    healthcheck:
+      test: redis-cli ping || exit 1
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Database
+  # ---------------------------------------------------------------------------
+  database:
+    container_name: immich_postgres
+    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_DB: ${DB_DATABASE_NAME}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - ${DB_DATA_LOCATION}:/var/lib/postgresql/data
+    shm_size: 128mb
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME} -d ${DB_DATABASE_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  model-cache:
+  proxy-tmp:
