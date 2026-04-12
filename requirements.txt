@@ -9,3 +9,5 @@ flask>=3.0.0
 
 # Windows timestamps (optional but recommended on Windows)
 pywin32>=306; sys_platform == "win32"
+
+aiohttp>=3.9.0
