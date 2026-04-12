@@ -257,6 +257,8 @@ async def _proxy_websocket(
     upstream_http = str(cfg.upstream).rstrip("/") + request.path_qs
     upstream_ws = _to_ws_url(upstream_http)
 
+    log.info("WebSocket bridge: client → %s", upstream_ws)
+
     client_ws = web.WebSocketResponse(autoping=False)
     await client_ws.prepare(request)
 
@@ -292,6 +294,7 @@ async def _proxy_websocket(
                     await server_ws.pong(msg.data)
                 elif msg.type == aiohttp.WSMsgType.CLOSE:
                     await server_ws.close()
+                    break
 
         async def server_to_client() -> None:
             async for msg in server_ws:
@@ -305,6 +308,7 @@ async def _proxy_websocket(
                     await client_ws.pong(msg.data)
                 elif msg.type == aiohttp.WSMsgType.CLOSE:
                     await client_ws.close()
+                    break
 
         relay_to_server = asyncio.create_task(client_to_server())
         relay_to_client = asyncio.create_task(server_to_client())
@@ -320,8 +324,12 @@ async def _proxy_websocket(
                 await task
 
         for task in done:
-            task.result()
+            try:
+                task.result()
+            except Exception as exc:
+                log.warning("WebSocket relay error: %s", exc, exc_info=True)
 
+    log.info("WebSocket bridge closed: %s", request.path)
     return client_ws
 
 
@@ -397,6 +405,20 @@ async def _passthrough(
         # decompress gzip/brotli assets correctly
         resp_headers = _filtered_response_header_pairs(resp.headers)
 
+        # Log DELETE responses to debug duplicate detection
+        is_delete = request.method == "DELETE"
+        if is_delete:
+            resp_body_for_log = await resp.read()
+            log.info(
+                "DELETE %s responded %d | body-bytes=%d",
+                request.path,
+                resp.status,
+                len(resp_body_for_log),
+            )
+            resp_body = resp_body_for_log
+        else:
+            resp_body = None  # Will stream below
+
         proxy_resp = web.StreamResponse(
             status=resp.status,
             reason=resp.reason,
@@ -404,8 +426,13 @@ async def _passthrough(
         )
         await proxy_resp.prepare(request)
 
-        async for chunk in resp.content.iter_chunked(64 * 1024):
-            await proxy_resp.write(chunk)
+        if is_delete and resp_body is not None:
+            # Write the buffered body for DELETE
+            await proxy_resp.write(resp_body)
+        else:
+            # Stream the response for non-DELETE or if not yet read
+            async for chunk in resp.content.iter_chunked(64 * 1024):
+                await proxy_resp.write(chunk)
 
         await proxy_resp.write_eof()
         return proxy_resp
