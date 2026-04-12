@@ -62,6 +62,13 @@ HOP_BY_HOP = {
 }
 
 
+def _filtered_response_header_pairs(
+    headers: aiohttp.typedefs.LooseHeaders,
+) -> list[tuple[str, str]]:
+    """Filter hop-by-hop response headers while preserving duplicate keys."""
+    return [(k, v) for k, v in headers.items() if k.lower() not in HOP_BY_HOP]
+
+
 # ---------------------------------------------------------------------------
 # Request helpers
 # ---------------------------------------------------------------------------
@@ -225,9 +232,7 @@ async def _intercept_upload(
         resp_body = await resp.read()
         return web.Response(
             status=resp.status,
-            headers={
-                k: v for k, v in resp.headers.items() if k.lower() not in HOP_BY_HOP
-            },
+            headers=_filtered_response_header_pairs(resp.headers),
             body=resp_body,
         )
 
@@ -358,9 +363,7 @@ async def _passthrough(
     ) as resp:
         # Build response headers — keep Content-Encoding so browser can
         # decompress gzip/brotli assets correctly
-        resp_headers = {
-            k: v for k, v in resp.headers.items() if k.lower() not in HOP_BY_HOP
-        }
+        resp_headers = _filtered_response_header_pairs(resp.headers)
 
         proxy_resp = web.StreamResponse(
             status=resp.status,
