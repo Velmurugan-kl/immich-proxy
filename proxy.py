@@ -179,29 +179,54 @@ async def _intercept_upload(
 # Generic transparent passthrough
 # ---------------------------------------------------------------------------
 
+# Headers that carry body/encoding info — must not be forwarded on GET/HEAD
+NO_BODY_METHODS = {"GET", "HEAD", "OPTIONS"}
+
 async def _passthrough(
     request: web.Request,
     cfg: AppConfig,
     session: aiohttp.ClientSession,
 ) -> web.StreamResponse:
-    """Forward any non-intercepted request to upstream verbatim, streaming the response."""
+    """
+    Forward any non-intercepted request to upstream verbatim.
+
+    Key fixes:
+    - GET/HEAD/OPTIONS requests send no body (passing request.content causes
+      aiohttp to hang waiting for data that never comes)
+    - Response headers are filtered but Content-Encoding is preserved so
+      compressed static assets (gzip/br) are streamed correctly
+    - WebSocket upgrade requests are passed through without body
+    """
     upstream_url = str(cfg.upstream).rstrip("/") + request.path_qs
+
+    # Only send a body for methods that actually have one
+    body = None if request.method in NO_BODY_METHODS else request.content
 
     async with session.request(
         method=request.method,
         url=upstream_url,
         headers=_upstream_headers(request),
-        data=request.content,
+        data=body,
         allow_redirects=False,
+        compress=False,   # do not re-compress — stream upstream response as-is
     ) as resp:
+        # Build response headers — keep Content-Encoding so browser can
+        # decompress gzip/brotli assets correctly
+        resp_headers = {
+            k: v for k, v in resp.headers.items()
+            if k.lower() not in HOP_BY_HOP
+        }
+
         proxy_resp = web.StreamResponse(
             status=resp.status,
-            headers={k: v for k, v in resp.headers.items()
-                     if k.lower() not in HOP_BY_HOP},
+            reason=resp.reason,
+            headers=resp_headers,
         )
         await proxy_resp.prepare(request)
+
         async for chunk in resp.content.iter_chunked(64 * 1024):
             await proxy_resp.write(chunk)
+
         await proxy_resp.write_eof()
         return proxy_resp
 
@@ -211,20 +236,17 @@ async def _passthrough(
 # ---------------------------------------------------------------------------
 
 async def handle(request: web.Request) -> web.StreamResponse:
-    cfg: AppConfig         = request.app["cfg"]
+    cfg: AppConfig                 = request.app["cfg"]
     session: aiohttp.ClientSession = request.app["session"]
 
-    is_upload = (
+    is_heic_upload = (
         request.method == "POST"
         and request.path == UPLOAD_PATH
         and "multipart/form-data" in request.content_type
     )
 
-    if is_upload:
-        # Peek at the filename before deciding to intercept
-        # aiohttp multipart is streaming — we check inside _intercept_upload
-        ct = request.content_type
-        log.debug("Upload request received")
+    if is_heic_upload:
+        log.debug("Upload intercepted: %s", request.path)
         return await _intercept_upload(request, cfg, session)
 
     return await _passthrough(request, cfg, session)
