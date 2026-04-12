@@ -121,10 +121,13 @@ def _to_ws_url(http_url: str) -> str:
 
 
 def _should_buffer_body(request: web.Request) -> bool:
+    """
+    Buffer body for non-multipart write requests.
+    Streaming multipart is important for large uploads; most API writes are small.
+    """
     content_type = request.headers.get("Content-Type", "").lower()
-    return request.method in {"DELETE", "PATCH", "PUT"} or content_type.startswith(
-        "application/json"
-    )
+    is_multipart = content_type.startswith("multipart/form-data")
+    return request.method in {"POST", "PUT", "PATCH", "DELETE"} and not is_multipart
 
 
 def _is_heic_field(field: aiohttp.BodyPartReader) -> bool:
@@ -351,6 +354,15 @@ async def _passthrough(
         body = await request.read()
         fwd_headers = _upstream_headers(request, strip_content_length=True)
         fwd_headers["Content-Length"] = str(len(body))
+
+        if request.path in {"/api/auth/login", "/api/assets"}:
+            log.info(
+                "Forwarding %s %s | content-type=%s | body-bytes=%d",
+                request.method,
+                request.path,
+                request.headers.get("Content-Type", ""),
+                len(body),
+            )
     else:
         body = request.content
         fwd_headers = _upstream_headers(request)
