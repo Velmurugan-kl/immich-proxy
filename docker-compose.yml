@@ -1,24 +1,26 @@
 # =============================================================================
-# Immich + HEIC Proxy  —  docker-compose.yml
+# Immich + HEIC Proxy  —  docker-compose.yml  (Portainer edition)
 # =============================================================================
 #
-# SETUP:
-#   1. Copy stack.env.example → stack.env and fill in your values
-#   2. docker compose up -d
-#   3. Point your Immich app / browser to  http://<host>:2283  (the proxy)
-#      The proxy transparently forwards everything except HEIC uploads.
+# SETUP IN PORTAINER:
+#   1. Stacks → Add stack → Repository (point to your GitHub repo)
+#   2. Add the following environment variables in Portainer's
+#      "Environment variables" section:
 #
-# CONFIG:
-#   All converter settings live in config.yaml (mounted into the proxy).
-#   Alternatively, override individual settings with environment variables
-#   (see the proxy service's `environment` block below).
-#   After changing config.yaml:  curl -X POST http://<host>:2285/admin/reload
-#   After changing env vars:     docker compose restart immich-heic-proxy
+#       UPLOAD_LOCATION       /mnt/d/HomeLab/immich/photos
+#       DB_DATA_LOCATION      /mnt/d/HomeLab/immich/postgres
+#       DB_PASSWORD           your_strong_password
+#       DB_USERNAME           immich
+#       DB_DATABASE_NAME      immich
+#       IMMICH_VERSION        release
+#
+#   3. Deploy the stack.
+#   4. Point your Immich app / browser to http://<host>:2283 (the proxy).
 #
 # PORTS:
-#   2283  →  proxy (clients connect here — same port Immich normally uses)
-#   2284  →  immich-server direct (bypass proxy, useful for debugging)
-#   2285  →  proxy admin API  (/admin/health, /admin/reload)
+#   2283  →  proxy (clients connect here)
+#   2284  →  immich-server direct (debug only)
+#   2285  →  proxy admin API (/admin/health, /admin/reload)
 # =============================================================================
 
 name: immich
@@ -26,51 +28,40 @@ name: immich
 services:
 
   # ---------------------------------------------------------------------------
-  # HEIC Proxy  — sits in front of immich-server
+  # HEIC Proxy
   # ---------------------------------------------------------------------------
   immich-heic-proxy:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/velmurugan-kl/immich-proxy:latest
     container_name: immich_heic_proxy
     ports:
-      - "2283:2283"    # main entry point for clients
-      - "2285:2285"    # admin API (reload, health)
+      - "2283:2283"
+      - "2285:2285"
     volumes:
-      # Mount config.yaml so you can edit it without rebuilding the image.
-      # Remove this line to bake config.yaml into the image instead.
-      - ./config.yaml:/app/config.yaml:ro
-      # Persistent tmp dir for in-flight conversions
+      # Named volumes — Portainer manages these, no host path needed
+      - proxy-config:/app/config
       - proxy-tmp:/tmp/proxy
     environment:
-      # --- Upstream Immich server ---
-      # Overrides the `upstream` key in config.yaml
+      # --- Upstream ---
       IMMICH_UPSTREAM: "http://immich-server:2283"
 
-      # --- Output format ---
-      # Overrides output.format in config.yaml
-      # Choices: jpeg | png | webp | tiff | original
+      # --- Output format: jpeg | png | webp | tiff | original ---
       IMMICH_FORMAT: "png"
 
-      # --- Quality settings (only the active format matters) ---
+      # --- Quality (only active format matters) ---
       IMMICH_JPEG_QUALITY: "95"
-      IMMICH_PNG_COMPRESSION: "0"
+      IMMICH_PNG_COMPRESSION: "1"
       IMMICH_WEBP_QUALITY: "90"
       IMMICH_WEBP_LOSSLESS: "false"
 
       # --- Filename template ---
-      # Overrides filename.template in config.yaml
       IMMICH_TEMPLATE: "{year}-{month}-{day}_{make}_{model}_{filename}"
       IMMICH_FALLBACK: "unknown"
 
-      # --- Workers ---
-      # Number of parallel conversion workers (0 = auto)
+      # --- Workers (0 = auto) ---
       IMMICH_WORKERS: "0"
 
-      # --- Proxy port ---
+      # --- Ports ---
       PROXY_PORT: "2283"
-
-      # --- Admin port ---
       ADMIN_PORT: "2285"
 
       # --- Tmp dir ---
@@ -89,7 +80,7 @@ services:
       start_period: 15s
 
   # ---------------------------------------------------------------------------
-  # Immich server  — now internal only (clients go through proxy)
+  # Immich server
   # ---------------------------------------------------------------------------
   immich-server:
     container_name: immich_server
@@ -97,10 +88,16 @@ services:
     volumes:
       - ${UPLOAD_LOCATION}:/usr/src/app/upload
       - /etc/localtime:/etc/localtime:ro
-    env_file:
-      - stack.env
+    environment:
+      # Inlined here instead of env_file so Portainer can resolve the variables
+      DB_HOSTNAME: database
+      DB_PORT: "5432"
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_USERNAME: ${DB_USERNAME}
+      DB_DATABASE_NAME: ${DB_DATABASE_NAME}
+      REDIS_HOSTNAME: redis
     ports:
-      - "2284:2283"    # direct access port (for debugging — not for clients)
+      - "2284:2283"    # direct access (debug only — do not use for clients)
     expose:
       - "2283"         # internal Docker network only
     depends_on:
@@ -159,4 +156,5 @@ services:
 
 volumes:
   model-cache:
+  proxy-config:
   proxy-tmp:
