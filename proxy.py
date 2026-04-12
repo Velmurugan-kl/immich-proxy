@@ -354,14 +354,33 @@ async def _passthrough(
         fwd_headers = _upstream_headers(request, strip_content_length=True)
         fwd_headers["Content-Length"] = str(len(body))
 
-        if request.path in {"/api/auth/login", "/api/assets"}:
+        is_login_path = request.path.rstrip("/") == "/api/auth/login"
+        is_assets_path = request.path.rstrip("/") == "/api/assets"
+
+        if is_login_path or is_assets_path:
             log.info(
-                "Forwarding %s %s | content-type=%s | body-bytes=%d",
+                (
+                    "Forwarding %s %s | incoming-content-type=%s "
+                    "| incoming-content-length=%s | incoming-transfer-encoding=%s "
+                    "| body-bytes=%d | forwarded-content-type=%s "
+                    "| forwarded-content-length=%s"
+                ),
                 request.method,
                 request.path,
                 request.headers.get("Content-Type", ""),
+                request.headers.get("Content-Length", ""),
+                request.headers.get("Transfer-Encoding", ""),
                 len(body),
+                fwd_headers.get("Content-Type", ""),
+                fwd_headers.get("Content-Length", ""),
             )
+
+            if len(body) == 0:
+                log.warning(
+                    "Empty buffered body for %s %s (client sent no readable payload)",
+                    request.method,
+                    request.path,
+                )
     else:
         body = request.content
         fwd_headers = _upstream_headers(request)
