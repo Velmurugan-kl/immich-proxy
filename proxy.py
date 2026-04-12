@@ -227,6 +227,7 @@ async def _intercept_upload(
         strip_content_type=True,
     )
     fwd_headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
+    fwd_headers["Content-Length"] = str(len(body))
 
     async with session.post(upstream_url, data=body, headers=fwd_headers) as resp:
         resp_body = await resp.read()
@@ -349,6 +350,7 @@ async def _passthrough(
     elif _should_buffer_body(request):
         body = await request.read()
         fwd_headers = _upstream_headers(request, strip_content_length=True)
+        fwd_headers["Content-Length"] = str(len(body))
     else:
         body = request.content
         fwd_headers = _upstream_headers(request)
