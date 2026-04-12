@@ -122,12 +122,11 @@ def _to_ws_url(http_url: str) -> str:
 
 def _should_buffer_body(request: web.Request) -> bool:
     """
-    Buffer body for non-multipart write requests.
-    Streaming multipart is important for large uploads; most API writes are small.
+    Do NOT buffer body for GET/HEAD/OPTIONS (they have no body).
+    WebSocket and streaming requests handle differently elsewhere.
+    Buffer everything else to ensure Content-Length is set correctly.
     """
-    content_type = request.headers.get("Content-Type", "").lower()
-    is_multipart = content_type.startswith("multipart/form-data")
-    return request.method in {"POST", "PUT", "PATCH", "DELETE"} and not is_multipart
+    return request.method not in NO_BODY_METHODS
 
 
 def _is_heic_field(field: aiohttp.BodyPartReader) -> bool:
