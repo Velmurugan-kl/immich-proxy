@@ -60,20 +60,15 @@ HOP_BY_HOP = {
 # ---------------------------------------------------------------------------
 
 def _upstream_headers(request: web.Request) -> dict[str, str]:
-    """
-    Strip hop-by-hop headers before forwarding upstream.
-    Also removes Accept-Encoding — we stream the response bytes verbatim
-    so the upstream must not compress in a way that requires decoding here.
-    The browser receives the raw compressed bytes directly and decompresses
-    them itself, which is correct proxy behaviour.
-    """
-    return {
+    headers = {
         k: v for k, v in request.headers.items()
         if k.lower() not in HOP_BY_HOP
-        and k.lower() != "content-length"    # aiohttp recalculates this
-        and k.lower() != "content-type"      # rebuilt for modified multipart
-        and k.lower() != "accept-encoding"   # let upstream respond uncompressed
+        and k.lower() != "content-length"
+        and k.lower() != "content-type"
     }
+    # Force no compression by explicitly setting Accept-Encoding
+    headers["Accept-Encoding"] = "identity"
+    return headers
 
 
 def _is_heic_field(field: aiohttp.BodyPartReader) -> bool:
