@@ -22,6 +22,8 @@ RUN python -m venv /venv \
     && /venv/bin/pip install --upgrade pip \
     && /venv/bin/pip install --no-cache-dir -r requirements.txt
 
+RUN pip install aiohttp brotli
+
 
 # --- Stage 2: runtime --------------------------------------------------------
 FROM python:3.11-slim AS runtime
