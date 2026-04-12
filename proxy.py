@@ -70,7 +70,8 @@ HOP_BY_HOP = {
 def _upstream_headers(
     request: web.Request,
     *,
-    strip_content_headers: bool = False,
+    strip_content_length: bool = False,
+    strip_content_type: bool = False,
 ) -> dict[str, str]:
     """
     Strip hop-by-hop headers before forwarding upstream.
@@ -86,10 +87,12 @@ def _upstream_headers(
         and k.lower() != "accept-encoding"  # let upstream respond uncompressed
     }
 
-    # Only strip body headers when we rebuild the body (multipart intercept).
-    if strip_content_headers:
+    if strip_content_length:
         headers.pop("Content-Length", None)
         headers.pop("content-length", None)
+
+    # Only strip Content-Type when we rebuild the body format entirely.
+    if strip_content_type:
         headers.pop("Content-Type", None)
         headers.pop("content-type", None)
 
@@ -108,6 +111,13 @@ def _to_ws_url(http_url: str) -> str:
     if http_url.startswith("http://"):
         return "ws://" + http_url[len("http://") :]
     return http_url
+
+
+def _should_buffer_body(request: web.Request) -> bool:
+    content_type = request.headers.get("Content-Type", "").lower()
+    return request.method in {"DELETE", "PATCH", "PUT"} or content_type.startswith(
+        "application/json"
+    )
 
 
 def _is_heic_field(field: aiohttp.BodyPartReader) -> bool:
@@ -204,7 +214,11 @@ async def _intercept_upload(
 
     body = b"\r\n".join(body_parts) + f"\r\n--{boundary}--".encode()
 
-    fwd_headers = _upstream_headers(request, strip_content_headers=True)
+    fwd_headers = _upstream_headers(
+        request,
+        strip_content_length=True,
+        strip_content_type=True,
+    )
     fwd_headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
 
     async with session.post(upstream_url, data=body, headers=fwd_headers) as resp:
@@ -238,7 +252,19 @@ async def _proxy_websocket(
     client_ws = web.WebSocketResponse(autoping=False)
     await client_ws.prepare(request)
 
-    ws_headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
+    ws_headers = {
+        k: v
+        for k, v in request.headers.items()
+        if k.lower()
+        not in {
+            "host",
+            "connection",
+            "upgrade",
+            "sec-websocket-key",
+            "sec-websocket-version",
+            "sec-websocket-extensions",
+        }
+    }
 
     async with session.ws_connect(
         upstream_ws,
@@ -311,13 +337,21 @@ async def _passthrough(
     if _is_websocket_request(request):
         return await _proxy_websocket(request, cfg, session)
 
-    # Only send a body for methods that actually have one
-    body = None if request.method in NO_BODY_METHODS else request.content
+    # Buffer JSON-style bodies so aiohttp sends the exact payload upstream.
+    if request.method in NO_BODY_METHODS:
+        body = None
+        fwd_headers = _upstream_headers(request)
+    elif _should_buffer_body(request):
+        body = await request.read()
+        fwd_headers = _upstream_headers(request, strip_content_length=True)
+    else:
+        body = request.content
+        fwd_headers = _upstream_headers(request)
 
     async with session.request(
         method=request.method,
         url=upstream_url,
-        headers=_upstream_headers(request),
+        headers=fwd_headers,
         data=body,
         allow_redirects=False,
         compress=False,  # do not re-compress — stream upstream response as-is
