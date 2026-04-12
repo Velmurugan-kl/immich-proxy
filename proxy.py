@@ -60,12 +60,19 @@ HOP_BY_HOP = {
 # ---------------------------------------------------------------------------
 
 def _upstream_headers(request: web.Request) -> dict[str, str]:
-    """Strip hop-by-hop headers before forwarding upstream."""
+    """
+    Strip hop-by-hop headers before forwarding upstream.
+    Also removes Accept-Encoding — we stream the response bytes verbatim
+    so the upstream must not compress in a way that requires decoding here.
+    The browser receives the raw compressed bytes directly and decompresses
+    them itself, which is correct proxy behaviour.
+    """
     return {
         k: v for k, v in request.headers.items()
         if k.lower() not in HOP_BY_HOP
-        and k.lower() != "content-length"   # aiohttp recalculates this
-        and k.lower() != "content-type"     # rebuilt for modified multipart
+        and k.lower() != "content-length"    # aiohttp recalculates this
+        and k.lower() != "content-type"      # rebuilt for modified multipart
+        and k.lower() != "accept-encoding"   # let upstream respond uncompressed
     }
 
 
@@ -282,7 +289,14 @@ async def admin_health(request: web.Request) -> web.Response:
 
 async def on_startup(app: web.Application) -> None:
     connector = aiohttp.TCPConnector(limit=100)
-    app["session"] = aiohttp.ClientSession(connector=connector)
+    # auto_decompress=False is critical — we are a proxy, not a client.
+    # We must stream the upstream response bytes (gzip/brotli/etc.) directly
+    # to the browser without touching them. If aiohttp decompresses them, it
+    # corrupts the Content-Encoding header and the browser can't render the page.
+    app["session"] = aiohttp.ClientSession(
+        connector=connector,
+        auto_decompress=False,
+    )
     log.info("Proxy started")
     log.info("  Upstream : %s", app["cfg"].upstream)
     log.info("  Format   : %s", app["cfg"].output.format.upper())

@@ -11,3 +11,4 @@ flask>=3.0.0
 pywin32>=306; sys_platform == "win32"
 
 aiohttp>=3.9.0
+Brotli>=1.0.9
