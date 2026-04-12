@@ -17,6 +17,7 @@ by restarting the container (or hitting POST /admin/reload).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import tempfile
@@ -44,14 +45,20 @@ log = logging.getLogger("proxy")
 # Constants
 # ---------------------------------------------------------------------------
 
-UPLOAD_PATH      = "/api/assets"
-HEIC_SUFFIXES    = {".heic", ".heif"}
-HEIC_MIME_TYPES  = {"image/heic", "image/heif", "image/heic-sequence"}
+UPLOAD_PATH = "/api/assets"
+HEIC_SUFFIXES = {".heic", ".heif"}
+HEIC_MIME_TYPES = {"image/heic", "image/heif", "image/heic-sequence"}
 
 # Headers that must not be forwarded to upstream (aiohttp sets them itself)
 HOP_BY_HOP = {
-    "connection", "keep-alive", "transfer-encoding",
-    "te", "trailer", "upgrade", "proxy-authorization", "proxy-authenticate",
+    "connection",
+    "keep-alive",
+    "transfer-encoding",
+    "te",
+    "trailer",
+    "upgrade",
+    "proxy-authorization",
+    "proxy-authenticate",
 }
 
 
@@ -59,7 +66,12 @@ HOP_BY_HOP = {
 # Request helpers
 # ---------------------------------------------------------------------------
 
-def _upstream_headers(request: web.Request) -> dict[str, str]:
+
+def _upstream_headers(
+    request: web.Request,
+    *,
+    strip_content_headers: bool = False,
+) -> dict[str, str]:
     """
     Strip hop-by-hop headers before forwarding upstream.
     Also removes Accept-Encoding — we stream the response bytes verbatim
@@ -67,13 +79,35 @@ def _upstream_headers(request: web.Request) -> dict[str, str]:
     The browser receives the raw compressed bytes directly and decompresses
     them itself, which is correct proxy behaviour.
     """
-    return {
-        k: v for k, v in request.headers.items()
+    headers = {
+        k: v
+        for k, v in request.headers.items()
         if k.lower() not in HOP_BY_HOP
-        and k.lower() != "content-length"    # aiohttp recalculates this
-        and k.lower() != "content-type"      # rebuilt for modified multipart
-        and k.lower() != "accept-encoding"   # let upstream respond uncompressed
+        and k.lower() != "accept-encoding"  # let upstream respond uncompressed
     }
+
+    # Only strip body headers when we rebuild the body (multipart intercept).
+    if strip_content_headers:
+        headers.pop("Content-Length", None)
+        headers.pop("content-length", None)
+        headers.pop("Content-Type", None)
+        headers.pop("content-type", None)
+
+    return headers
+
+
+def _is_websocket_request(request: web.Request) -> bool:
+    upgrade = request.headers.get("Upgrade", "").lower()
+    connection = request.headers.get("Connection", "").lower()
+    return upgrade == "websocket" and "upgrade" in connection
+
+
+def _to_ws_url(http_url: str) -> str:
+    if http_url.startswith("https://"):
+        return "wss://" + http_url[len("https://") :]
+    if http_url.startswith("http://"):
+        return "ws://" + http_url[len("http://") :]
+    return http_url
 
 
 def _is_heic_field(field: aiohttp.BodyPartReader) -> bool:
@@ -92,6 +126,7 @@ def _is_heic_field(field: aiohttp.BodyPartReader) -> bool:
 # Core intercept logic
 # ---------------------------------------------------------------------------
 
+
 async def _intercept_upload(
     request: web.Request,
     cfg: AppConfig,
@@ -101,12 +136,12 @@ async def _intercept_upload(
     Read the multipart upload, convert any HEIC assetData field,
     rebuild the multipart, and forward to upstream Immich.
     """
-    upstream_url = str(cfg.upstream).rstrip("/") + UPLOAD_PATH
+    upstream_url = str(cfg.upstream).rstrip("/") + request.path_qs
 
     # Read all multipart fields into memory / temp files
-    reader      = await request.multipart()
-    out_fields  = []   # list of (name, value_bytes, original_headers)
-    converted   = False
+    reader = await request.multipart()
+    out_fields = []  # list of (name, value_bytes, original_headers)
+    converted = False
 
     tmp_dir = cfg.tmp_path
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -128,12 +163,12 @@ async def _intercept_upload(
 
                 # Build replacement headers for this field
                 ext_to_mime = {
-                    ".jpg":  "image/jpeg",
-                    ".png":  "image/png",
+                    ".jpg": "image/jpeg",
+                    ".png": "image/png",
                     ".webp": "image/webp",
                     ".tiff": "image/tiff",
                 }
-                new_ext  = Path(new_name).suffix.lower()
+                new_ext = Path(new_name).suffix.lower()
                 new_mime = ext_to_mime.get(new_ext, "application/octet-stream")
 
                 new_headers = {
@@ -169,15 +204,16 @@ async def _intercept_upload(
 
     body = b"\r\n".join(body_parts) + f"\r\n--{boundary}--".encode()
 
-    fwd_headers = _upstream_headers(request)
+    fwd_headers = _upstream_headers(request, strip_content_headers=True)
     fwd_headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
 
     async with session.post(upstream_url, data=body, headers=fwd_headers) as resp:
         resp_body = await resp.read()
         return web.Response(
             status=resp.status,
-            headers={k: v for k, v in resp.headers.items()
-                     if k.lower() not in HOP_BY_HOP},
+            headers={
+                k: v for k, v in resp.headers.items() if k.lower() not in HOP_BY_HOP
+            },
             body=resp_body,
         )
 
@@ -188,6 +224,72 @@ async def _intercept_upload(
 
 # Headers that carry body/encoding info — must not be forwarded on GET/HEAD
 NO_BODY_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+async def _proxy_websocket(
+    request: web.Request,
+    cfg: AppConfig,
+    session: aiohttp.ClientSession,
+) -> web.WebSocketResponse:
+    """Bridge client websocket <-> upstream websocket."""
+    upstream_http = str(cfg.upstream).rstrip("/") + request.path_qs
+    upstream_ws = _to_ws_url(upstream_http)
+
+    client_ws = web.WebSocketResponse(autoping=False)
+    await client_ws.prepare(request)
+
+    ws_headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
+
+    async with session.ws_connect(
+        upstream_ws,
+        headers=ws_headers,
+        autoping=False,
+    ) as server_ws:
+
+        async def client_to_server() -> None:
+            async for msg in client_ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    await server_ws.send_str(msg.data)
+                elif msg.type == aiohttp.WSMsgType.BINARY:
+                    await server_ws.send_bytes(msg.data)
+                elif msg.type == aiohttp.WSMsgType.PING:
+                    await server_ws.ping(msg.data)
+                elif msg.type == aiohttp.WSMsgType.PONG:
+                    await server_ws.pong(msg.data)
+                elif msg.type == aiohttp.WSMsgType.CLOSE:
+                    await server_ws.close()
+
+        async def server_to_client() -> None:
+            async for msg in server_ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    await client_ws.send_str(msg.data)
+                elif msg.type == aiohttp.WSMsgType.BINARY:
+                    await client_ws.send_bytes(msg.data)
+                elif msg.type == aiohttp.WSMsgType.PING:
+                    await client_ws.ping(msg.data)
+                elif msg.type == aiohttp.WSMsgType.PONG:
+                    await client_ws.pong(msg.data)
+                elif msg.type == aiohttp.WSMsgType.CLOSE:
+                    await client_ws.close()
+
+        relay_to_server = asyncio.create_task(client_to_server())
+        relay_to_client = asyncio.create_task(server_to_client())
+
+        done, pending = await asyncio.wait(
+            {relay_to_server, relay_to_client},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        for task in pending:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        for task in done:
+            task.result()
+
+    return client_ws
+
 
 async def _passthrough(
     request: web.Request,
@@ -206,6 +308,9 @@ async def _passthrough(
     """
     upstream_url = str(cfg.upstream).rstrip("/") + request.path_qs
 
+    if _is_websocket_request(request):
+        return await _proxy_websocket(request, cfg, session)
+
     # Only send a body for methods that actually have one
     body = None if request.method in NO_BODY_METHODS else request.content
 
@@ -215,13 +320,12 @@ async def _passthrough(
         headers=_upstream_headers(request),
         data=body,
         allow_redirects=False,
-        compress=False,   # do not re-compress — stream upstream response as-is
+        compress=False,  # do not re-compress — stream upstream response as-is
     ) as resp:
         # Build response headers — keep Content-Encoding so browser can
         # decompress gzip/brotli assets correctly
         resp_headers = {
-            k: v for k, v in resp.headers.items()
-            if k.lower() not in HOP_BY_HOP
+            k: v for k, v in resp.headers.items() if k.lower() not in HOP_BY_HOP
         }
 
         proxy_resp = web.StreamResponse(
@@ -242,14 +346,18 @@ async def _passthrough(
 # Route handler
 # ---------------------------------------------------------------------------
 
+
 async def handle(request: web.Request) -> web.StreamResponse:
-    cfg: AppConfig                 = request.app["cfg"]
+    cfg: AppConfig = request.app["cfg"]
     session: aiohttp.ClientSession = request.app["session"]
+
+    content_type = request.headers.get("Content-Type", "").lower()
+    path = request.path.rstrip("/") or "/"
 
     is_heic_upload = (
         request.method == "POST"
-        and request.path == UPLOAD_PATH
-        and "multipart/form-data" in request.content_type
+        and path == UPLOAD_PATH
+        and content_type.startswith("multipart/form-data")
     )
 
     if is_heic_upload:
@@ -262,6 +370,7 @@ async def handle(request: web.Request) -> web.StreamResponse:
 # ---------------------------------------------------------------------------
 # Admin endpoints
 # ---------------------------------------------------------------------------
+
 
 async def admin_reload(request: web.Request) -> web.Response:
     """POST /admin/reload — reload config.yaml without restarting the container."""
@@ -276,16 +385,19 @@ async def admin_reload(request: web.Request) -> web.Response:
 async def admin_health(request: web.Request) -> web.Response:
     """GET /admin/health — liveness probe for Docker healthcheck."""
     cfg: AppConfig = request.app["cfg"]
-    return web.json_response({
-        "status": "ok",
-        "upstream": str(cfg.upstream),
-        "format": cfg.output.format,
-    })
+    return web.json_response(
+        {
+            "status": "ok",
+            "upstream": str(cfg.upstream),
+            "format": cfg.output.format,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
 # App lifecycle
 # ---------------------------------------------------------------------------
+
 
 async def on_startup(app: web.Application) -> None:
     connector = aiohttp.TCPConnector(limit=100)
@@ -323,6 +435,7 @@ def make_app(cfg: AppConfig) -> web.Application:
 
 # ---------------------------------------------------------------------------
 
+
 def _apply_env_overrides(cfg: AppConfig) -> AppConfig:
     """
     Apply environment variable overrides onto the loaded config.
@@ -341,6 +454,7 @@ def _apply_env_overrides(cfg: AppConfig) -> AppConfig:
     IMMICH_WORKERS      cfg.processing.workers
     IMMICH_TMP_DIR      cfg.paths.tmp_dir
     """
+
     def env(key: str) -> str | None:
         return os.environ.get(key) or None
 
@@ -368,7 +482,7 @@ def _apply_env_overrides(cfg: AppConfig) -> AppConfig:
 
 
 if __name__ == "__main__":
-    cfg  = load_config()
-    cfg  = _apply_env_overrides(cfg)
+    cfg = load_config()
+    cfg = _apply_env_overrides(cfg)
     port = int(os.environ.get("PROXY_PORT", 2283))
     web.run_app(make_app(cfg), host="0.0.0.0", port=port)
