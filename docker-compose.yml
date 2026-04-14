@@ -26,7 +26,6 @@
 name: immich
 
 services:
-
   # ---------------------------------------------------------------------------
   # HEIC Proxy
   # ---------------------------------------------------------------------------
@@ -72,12 +71,19 @@ services:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c",
-             "import urllib.request; urllib.request.urlopen('http://localhost:2283/admin/health')"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:2283/admin/health')",
+        ]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 15s
+    networks:
+      - immich-net
 
   # ---------------------------------------------------------------------------
   # Immich server
@@ -97,19 +103,28 @@ services:
       DB_DATABASE_NAME: ${DB_DATABASE_NAME}
       REDIS_HOSTNAME: redis
     ports:
-      - "2284:2283"    # direct access (debug only — do not use for clients)
+      - "2284:2283" # direct access (debug only — do not use for clients)
     expose:
-      - "2283"         # internal Docker network only
+      - "2283" # internal Docker network only
     depends_on:
       - redis
       - database
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:2283/api/server/ping"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "--spider",
+          "-q",
+          "http://localhost:2283/api/server/ping",
+        ]
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 30s
+    networks:
+      - immich-net
 
   # ---------------------------------------------------------------------------
   # Machine learning
@@ -122,6 +137,8 @@ services:
     restart: unless-stopped
     healthcheck:
       disable: false
+    networks:
+      - immich-net
 
   # ---------------------------------------------------------------------------
   # Redis
@@ -132,6 +149,8 @@ services:
     healthcheck:
       test: redis-cli ping || exit 1
     restart: unless-stopped
+    networks:
+      - immich-net
 
   # ---------------------------------------------------------------------------
   # Database
@@ -153,8 +172,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - immich-net
 
 volumes:
   model-cache:
   proxy-config:
   proxy-tmp:
+
+networks:
+  immich-net:
+    driver: bridge
